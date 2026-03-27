@@ -67,7 +67,6 @@ use {
     thiserror::Error,
     wincode::{
         SchemaRead, SchemaWrite, TypeMeta,
-        containers::Pod,
         io::{Reader, Writer},
     },
 };
@@ -235,10 +234,15 @@ enum ShredVariant {
     MerkleData { proof_size: u8, resigned: bool }, // 0b10??_????
 }
 
+wincode::pod_wrapper! {
+    unsafe struct PodSignature(Signature);
+    unsafe struct PodShredFlags(ShredFlags);
+}
+
 /// A common header that is present in data and code shred headers
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaRead, SchemaWrite)]
 struct ShredCommonHeader {
-    #[wincode(with = "wincode::containers::Pod<Signature>")]
+    #[wincode(with = "PodSignature")]
     signature: Signature,
     shred_variant: ShredVariant,
     slot: Slot,
@@ -251,7 +255,7 @@ struct ShredCommonHeader {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaRead, SchemaWrite)]
 struct DataShredHeader {
     parent_offset: u16,
-    #[wincode(with = "Pod<_>")]
+    #[wincode(with = "PodShredFlags")]
     flags: ShredFlags,
     size: u16, // common shred header + data shred header + data
 }
