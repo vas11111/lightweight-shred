@@ -778,6 +778,97 @@ pub(super) fn recover(
         .filter_map(Result::transpose))
 }
 
+/// Fast recovery — RS reconstruct + header parse, skips merkle tree/proof/root verification.
+/// Returns only the newly recovered DATA shreds (not coding, not originals).
+///
+/// Saves ~30-40% vs full `recover()` by skipping:
+///   - SHA256 merkle node computation for every shard
+///   - Merkle tree construction
+///   - Root verification
+///   - Proof generation + serialization into recovered shred payloads
+pub(super) fn recover_data_only(
+    mut shreds: Vec<Shred>,
+    reed_solomon_cache: &ReedSolomonCache,
+) -> Result<Vec<Shred>, Error> {
+    let is_sorted = |(a, b)| cmp_shred_erasure_shard_index(a, b).is_le();
+    if !shreds.iter().tuple_windows().all(is_sorted) {
+        shreds.sort_unstable_by(cmp_shred_erasure_shard_index);
+    }
+
+    let (common_header, coding_header, chained_merkle_root, retransmitter_signature) = {
+        let Some(Shred::ShredCode(shred)) = shreds.last() else {
+            return Err(Error::from(TooFewParityShards));
+        };
+        let position = u32::from(shred.coding_header.position);
+        let index = shred.common_header.index.checked_sub(position)
+            .ok_or(Error::from(InvalidIndex))?;
+        (
+            ShredCommonHeader { index, ..shred.common_header },
+            CodingShredHeader { position: 0u16, ..shred.coding_header },
+            shred.chained_merkle_root().ok(),
+            shred.retransmitter_signature().ok(),
+        )
+    };
+
+    let num_data_shreds = usize::from(coding_header.num_data_shreds);
+    let num_coding_shreds = usize::from(coding_header.num_coding_shreds);
+    let num_shards = num_data_shreds + num_coding_shreds;
+
+    // Track which positions had original shreds vs stubs
+    let mut mask = vec![false; num_shards];
+    let mut num_missing_data: usize = 0;
+
+    let mut shreds = {
+        let make_stub = |i| make_stub_shred(i, &common_header, &coding_header, &chained_merkle_root, &retransmitter_signature);
+        let mut batch = Vec::with_capacity(num_shards);
+        for shred in shreds {
+            if shred.signature() != &common_header.signature {
+                return Err(Error::InvalidMerkleRoot);
+            }
+            let idx = shred.erasure_shard_index()?;
+            if !(batch.len()..num_shards).contains(&idx) {
+                return Err(Error::from(InvalidIndex));
+            }
+            while batch.len() < idx {
+                if batch.len() < num_data_shreds { num_missing_data += 1; }
+                batch.push(make_stub(batch.len())?);
+            }
+            mask[idx] = true;
+            batch.push(shred);
+        }
+        while batch.len() < num_shards {
+            if batch.len() < num_data_shreds { num_missing_data += 1; }
+            batch.push(make_stub(batch.len())?);
+        }
+        batch
+    };
+
+    // RS reconstruct — the hot path
+    let mut shards = shreds.iter_mut()
+        .zip(&mask)
+        .map(|(shred, &present)| Ok((shred.erasure_shard_mut()?, present)))
+        .collect::<Result<Vec<_>, Error>>()?;
+    reed_solomon_cache
+        .get(num_data_shreds, num_coding_shreds)?
+        .reconstruct(&mut shards)?;
+    drop(shards);
+
+    // Extract only recovered data shreds — no merkle, no proofs
+    let mut recovered = Vec::with_capacity(num_missing_data);
+    for (index, (mut shred, was_present)) in shreds.into_iter().zip(mask).enumerate() {
+        if was_present || index >= num_data_shreds { continue; }
+        let Shred::ShredData(ref mut data_shred) = shred else { continue };
+        if let Ok((hdr, data_hdr)) = wincode::deserialize::<(ShredCommonHeader, DataShredHeader)>(&data_shred.payload[..]) {
+            if data_shred.common_header == hdr {
+                data_shred.data_header = data_hdr;
+                recovered.push(shred);
+            }
+        }
+    }
+
+    Ok(recovered)
+}
+
 #[inline]
 fn cmp_shred_erasure_shard_index(a: &Shred, b: &Shred) -> Ordering {
     debug_assert_eq!(

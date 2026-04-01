@@ -718,6 +718,23 @@ pub fn recover<T: IntoIterator<Item = Shred>>(
     Ok(shreds.map(|shred| shred.map(Shred::from)))
 }
 
+/// Fast recovery — RS reconstruct only, skips merkle tree/proof/root verification.
+/// Returns only recovered DATA shreds with parsed headers.
+///
+/// Use this when you only need the data payloads (e.g. transaction parsing)
+/// and don't need merkle-valid shreds for retransmission.
+pub fn recover_data_only<T: IntoIterator<Item = Shred>>(
+    shreds: T,
+    reed_solomon_cache: &ReedSolomonCache,
+) -> Result<Vec<Shred>, Error> {
+    let shreds = shreds
+        .into_iter()
+        .map(|shred| merkle::Shred::try_from(shred))
+        .collect::<Result<_, _>>()?;
+    let recovered = merkle::recover_data_only(shreds, reed_solomon_cache)?;
+    Ok(recovered.into_iter().map(Shred::from).collect())
+}
+
 /// Inline replacement for crate::blockstore::verify_shred_slots
 fn verify_shred_slots(slot: Slot, parent: Slot, root: Slot) -> bool {
     if slot == 0 && parent == 0 && root == 0 {
