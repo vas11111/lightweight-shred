@@ -735,6 +735,35 @@ pub fn recover_data_only<T: IntoIterator<Item = Shred>>(
     Ok(recovered.into_iter().map(Shred::from).collect())
 }
 
+/// Fastest recovery — takes raw byte slices directly, skips Shred construction on input.
+/// Avoids per-shred header parsing + sanitize + variant validation on the caller side.
+/// Only parses the coding header from one code shred, builds erasure shards from raw bytes,
+/// runs RS reconstruct, and returns recovered data shreds.
+///
+/// `raw_shreds`: iterator of `(raw_bytes, is_data)` — raw shred payloads as Bytes slices.
+/// The shreds must all belong to the same FEC set.
+pub fn recover_from_raw<I>(
+    raw_shreds: I,
+    reed_solomon_cache: &ReedSolomonCache,
+) -> Result<Vec<Shred>, Error>
+where
+    I: IntoIterator<Item = (bytes::Bytes, bool)>,
+{
+    // Collect into merkle::Shred with minimal parsing (skip sanitize)
+    let shreds: Vec<merkle::Shred> = raw_shreds
+        .into_iter()
+        .map(|(raw, is_data)| {
+            if is_data {
+                merkle::ShredData::from_payload_unchecked(raw).map(merkle::Shred::ShredData)
+            } else {
+                merkle::ShredCode::from_payload_unchecked(raw).map(merkle::Shred::ShredCode)
+            }
+        })
+        .collect::<Result<_, _>>()?;
+    let recovered = merkle::recover_data_only(shreds, reed_solomon_cache)?;
+    Ok(recovered.into_iter().map(Shred::from).collect())
+}
+
 /// Inline replacement for crate::blockstore::verify_shred_slots
 fn verify_shred_slots(slot: Slot, parent: Slot, root: Slot) -> bool {
     if slot == 0 && parent == 0 && root == 0 {

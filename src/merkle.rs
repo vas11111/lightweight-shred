@@ -128,6 +128,20 @@ impl ShredData {
     // Offset into the payload where the erasure coded slice begins.
     const ERASURE_SHARD_START_OFFSET: usize = SIZE_OF_SIGNATURE;
 
+    /// Parse headers only — skip sanitize/merkle proof validation.
+    pub(super) fn from_payload_unchecked<T>(payload: T) -> Result<Self, Error>
+    where
+        Payload: From<T>,
+    {
+        let mut payload = Payload::from(payload);
+        if payload.len() < Self::SIZE_OF_PAYLOAD {
+            return Err(Error::InvalidPayloadSize(payload.len()));
+        }
+        payload.truncate(Self::SIZE_OF_PAYLOAD);
+        let (common_header, data_header) = wincode::deserialize(&payload[..])?;
+        Ok(Self { common_header, data_header, payload })
+    }
+
     pub(super) fn get_data(
         shred: &[u8],
         proof_size: u8,
@@ -201,6 +215,20 @@ impl ShredCode {
 
     // Offset into the payload where the erasure coded slice begins.
     const ERASURE_SHARD_START_OFFSET: usize = Self::SIZE_OF_HEADERS;
+
+    /// Parse headers only — skip sanitize/merkle proof validation.
+    pub(super) fn from_payload_unchecked<T>(payload: T) -> Result<Self, Error>
+    where
+        Payload: From<T>,
+    {
+        let mut payload = Payload::from(payload);
+        let (common_header, coding_header) = wincode::deserialize(&payload[..])?;
+        if payload.len() < Self::SIZE_OF_PAYLOAD {
+            return Err(Error::InvalidPayloadSize(payload.len()));
+        }
+        payload.truncate(Self::SIZE_OF_PAYLOAD);
+        Ok(Self { common_header, coding_header, payload })
+    }
 
     pub(super) fn get_merkle_root(shred: &[u8], proof_size: u8, resigned: bool) -> Option<Hash> {
         debug_assert_eq!(
