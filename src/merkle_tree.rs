@@ -107,6 +107,19 @@ where
         .ok_or(Error::InvalidMerkleProof)
 }
 
+// Given number of shreds, returns the number of nodes in the Merkle tree.
 pub fn get_merkle_tree_size(num_shreds: usize) -> usize {
     successors(Some(num_shreds), |&k| (k > 1).then_some((k + 1) >> 1)).sum()
+}
+
+// Maps number of (code + data) shreds to merkle_proof.len().
+pub const fn get_proof_size(num_shreds: usize) -> u8 {
+    let bits = usize::BITS - num_shreds.leading_zeros();
+    let proof_size = if num_shreds.is_power_of_two() {
+        bits.saturating_sub(1)
+    } else {
+        bits
+    };
+    // this can never overflow because bits < 64
+    proof_size as u8
 }

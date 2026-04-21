@@ -8,7 +8,7 @@ description = "Vendored Solana shred parsing and FEC recovery — without rocksd
 # Solana types
 solana-hash = "4.2"
 solana-pubkey = "4.1"
-solana-signature = { version = "3.3", features = ["serde", "std", "verify"] }
+solana-signature = { version = "3.4", features = ["serde", "std", "verify", "wincode"] }
 solana-sha256-hasher = "3.1"
 solana-signer = "3.0"
 
@@ -16,7 +16,7 @@ solana-signer = "3.0"
 bytes = "1.11"
 reed-solomon-erasure = { version = "6.0", features = ["simd-accel"] }
 lazy-lru = "0.1"
-wincode = { version = "0.4.6", features = ["derive"] }
+wincode = { version = "0.5.3", features = ["derive", "bytes"] }
 
 # Utilities
 serde = { version = "1.0", features = ["derive"] }

@@ -72,9 +72,9 @@ use {
 };
 pub use {
     self::{
-        merkle::ShredCode,
+        merkle::{ShredCode, ShredData},
         payload::Payload,
-        stats::ShredFetchStats,
+        stats::{ProcessShredsStats, ShredFetchStats},
     },
 };
 
@@ -86,7 +86,7 @@ pub const PACKET_DATA_SIZE: usize = 1232;
 
 mod common;
 pub mod merkle;
-mod merkle_tree;
+pub mod merkle_tree;
 mod payload;
 mod shred_code;
 pub(crate) mod shred_data;
@@ -118,8 +118,13 @@ pub const CODING_SHREDS_PER_FEC_BLOCK: usize = 32;
 pub const SHREDS_PER_FEC_BLOCK: usize = DATA_SHREDS_PER_FEC_BLOCK + CODING_SHREDS_PER_FEC_BLOCK;
 
 /// An upper bound on maximum number of data shreds we can handle in a slot
+/// 32K shreds would allow ~320K peak TPS
+/// (32K shreds per slot * 4 TX per shred * 2.5 slots per sec)
 pub const MAX_DATA_SHREDS_PER_SLOT: usize = 32_768;
 pub const MAX_CODE_SHREDS_PER_SLOT: usize = MAX_DATA_SHREDS_PER_SLOT;
+
+pub const MAX_FEC_SETS_PER_SLOT: u32 =
+    MAX_DATA_SHREDS_PER_SLOT as u32 / DATA_SHREDS_PER_FEC_BLOCK as u32;
 
 // Statically compute the typical data batch size assuming:
 // 1. 32:32 erasure coding batch
@@ -235,14 +240,12 @@ enum ShredVariant {
 }
 
 wincode::pod_wrapper! {
-    unsafe struct PodSignature(Signature);
     unsafe struct PodShredFlags(ShredFlags);
 }
 
 /// A common header that is present in data and code shred headers
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaRead, SchemaWrite)]
 struct ShredCommonHeader {
-    #[wincode(with = "PodSignature")]
     signature: Signature,
     shred_variant: ShredVariant,
     slot: Slot,
@@ -329,6 +332,11 @@ impl ErasureSetId {
         self.0
     }
 
+    pub(crate) fn fec_set_index(&self) -> u32 {
+        self.1
+    }
+
+    // Storage key for ErasureMeta and MerkleRootMeta in blockstore db.
     pub(crate) fn store_key(&self) -> (Slot, /*fec_set_index:*/ u32) {
         (self.0, self.1)
     }
@@ -750,7 +758,6 @@ pub fn should_discard_shred(
     root: Slot,
     max_slot: Slot,
     shred_version: u16,
-    enforce_fixed_fec_set: impl Fn(Slot) -> bool,
     discard_unexpected_data_complete_shreds: impl Fn(Slot) -> bool,
     stats: &mut ShredFetchStats,
 ) -> bool {
@@ -815,9 +822,7 @@ pub fn should_discard_shred(
 
             if !erasure_config.is_fixed() {
                 stats.misaligned_erasure_config += 1;
-                if enforce_fixed_fec_set(slot) {
-                    return true;
-                }
+                return true;
             }
         }
         ShredType::Data => {
@@ -843,12 +848,15 @@ pub fn should_discard_shred(
                 return true;
             };
 
+            let expected_data_complete_index = fec_set_index
+                .checked_add(DATA_SHREDS_PER_FEC_BLOCK as u32)
+                .and_then(|index| index.checked_sub(1));
             if shred_flags.contains(ShredFlags::DATA_COMPLETE_SHRED)
-                && index != fec_set_index + DATA_SHREDS_PER_FEC_BLOCK as u32 - 1
+                && (expected_data_complete_index != Some(index))
             {
                 stats.unexpected_data_complete_shred += 1;
 
-                if enforce_fixed_fec_set(slot) && discard_unexpected_data_complete_shreds(slot) {
+                if discard_unexpected_data_complete_shreds(slot) {
                     return true;
                 }
             }
@@ -857,18 +865,14 @@ pub fn should_discard_shred(
                 && !check_last_data_shred_index(index)
             {
                 stats.misaligned_last_data_index += 1;
-                if enforce_fixed_fec_set(slot) {
-                    return true;
-                }
+                return true;
             }
         }
     }
 
     if !check_fixed_fec_set(index, fec_set_index) {
         stats.misaligned_fec_set += 1;
-        if enforce_fixed_fec_set(slot) {
-            return true;
-        }
+        return true;
     }
 
     match shred_variant {
@@ -884,12 +888,25 @@ pub fn should_discard_shred(
     false
 }
 
+/// Returns true if `index` and `fec_set_index` are valid under the assumption that
+/// all erasure sets contain exactly `DATA_SHREDS_PER_FEC_BLOCK` data and coding shreds:
+/// - `index` is between `fec_set_index` and `fec_set_index + DATA_SHREDS_PER_FEC_BLOCK`
+/// - `fec_set_index` is a multiple of `DATA_SHREDS_PER_FEC_BLOCK`
 fn check_fixed_fec_set(index: u32, fec_set_index: u32) -> bool {
+    let Some(fec_set_end_exclusive) = fec_set_index.checked_add(DATA_SHREDS_PER_FEC_BLOCK as u32)
+    else {
+        return false;
+    };
     index >= fec_set_index
-        && index < fec_set_index + DATA_SHREDS_PER_FEC_BLOCK as u32
+        && index < fec_set_end_exclusive
         && fec_set_index.is_multiple_of(DATA_SHREDS_PER_FEC_BLOCK as u32)
 }
 
+/// Returns true if `index` of the last data shred is valid under the assumption that
+/// all erasure sets contain exactly `DATA_SHREDS_PER_FEC_BLOCK` data and coding shreds:
+/// - `index + 1` must be a multiple of `DATA_SHREDS_PER_FEC_BLOCK`
+///
+/// Note: this check is critical to verify that the last fec set is sufficiently sized.
 fn check_last_data_shred_index(index: u32) -> bool {
     (index + 1).is_multiple_of(DATA_SHREDS_PER_FEC_BLOCK as u32)
 }
