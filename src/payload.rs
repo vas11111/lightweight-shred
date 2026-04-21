@@ -6,9 +6,10 @@ use {
         ops::{Bound, Deref, DerefMut, RangeBounds, RangeFull},
         slice::SliceIndex,
     },
+    wincode::{SchemaRead, SchemaWrite},
 };
 
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug, Eq, SchemaRead, SchemaWrite)]
 pub struct Payload {
     pub bytes: Bytes,
 }
