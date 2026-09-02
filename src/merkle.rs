@@ -843,14 +843,22 @@ pub(super) fn recover_data_only(
         batch
     };
 
-    // RS reconstruct — the hot path
+    // RS reconstruct — the hot path.
+    //
+    // `reconstruct_data`, not `reconstruct`: only the missing DATA shards are
+    // ever read below, but `reconstruct` also regenerates every missing parity
+    // shard, which for a typical loss (one or two data shreds gone, most of
+    // the coding shreds never received) is ~30 parity shards of matrix work
+    // computed into stubs that are dropped on the next line. The parity stubs
+    // stay: the RS API wants a slot for every shard, and an absent parity slot
+    // is simply never written under `reconstruct_data`.
     let mut shards = shreds.iter_mut()
         .zip(&mask)
         .map(|(shred, &present)| Ok((shred.erasure_shard_mut()?, present)))
         .collect::<Result<Vec<_>, Error>>()?;
     reed_solomon_cache
         .get(num_data_shreds, num_coding_shreds)?
-        .reconstruct(&mut shards)?;
+        .reconstruct_data(&mut shards)?;
     drop(shards);
 
     // Extract only recovered data shreds — no merkle, no proofs
